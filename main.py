@@ -20,7 +20,7 @@ def main():
     print("\n[1단계] 오디오/비디오 분리")
     print("-" * 70)
 
-    av_separator = AudioVideoSeparator(output_dir="./data/output")
+    av_separator = AudioVideoSeparator(output_dir="data/temp")
 
     # 대상 비디오 지정 (data/input/example.mp4 또는 파일명만)
     video_file = "example_001.mp4"
@@ -39,7 +39,7 @@ def main():
 
     session_separator = SessionSeparator(
         model_name="htdemucs",  # 고품질 모델
-        output_dir="./data/output"
+        output_dir="data/temp"
     )
 
     # 분리된 오디오 파일명 추출

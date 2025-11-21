@@ -33,7 +33,7 @@ class SeparationResult:
 class AudioVideoSeparator:
     """FFmpeg 기반 오디오/비디오 분리 및 동기화 검증"""
 
-    def __init__(self, output_dir: str = "./data/output"):  # 👈 변경 1
+    def __init__(self, output_dir: str = "./data/temp"):  # 👈 변경 1
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 

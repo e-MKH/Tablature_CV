@@ -35,7 +35,7 @@ class SessionSeparator:
             self,
             model_name: str = "htdemucs",
             device: Optional[str] = None,
-            output_dir: str = "./data/output"
+            output_dir: str = "./data/temp"
     ):
         """
         Args:
@@ -239,7 +239,7 @@ if __name__ == "__main__":
     # 사용 예시
     separator = SessionSeparator(
         model_name="htdemucs",
-        output_dir="./data/output"
+        output_dir="./data/temp"
     )
 
     # 세션 분리
