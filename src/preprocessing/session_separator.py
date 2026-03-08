@@ -2,6 +2,7 @@ import subprocess
 import shutil
 from pathlib import Path
 from typing import List, Dict, Optional
+import sys
 
 
 class SessionSeparator:
@@ -76,7 +77,7 @@ class SessionSeparator:
         print(f"분리할 stem: {stems if stems else 'all'}")
 
         # Demucs 명령어 구성
-        cmd = ["python", "-m", "demucs", "-n", self.model]
+        cmd = [sys.executable, "-m", "demucs", "-n", self.model]    # 현재 실행 중인 Python(venv) 사용 / 기존은 PATH 사용하는 전역 python
 
         # 특정 stem만 분리하는 경우
         if stems is not None and len(stems) == 1:
