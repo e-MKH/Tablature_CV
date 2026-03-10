@@ -95,7 +95,8 @@ data/
 pip install -r requirements.txt
 ```
 
-> `requirements.txt`에는 MediaPipe의 로컬 whl 경로가 포함되어 있습니다. 필요 시 해당 경로를 수정하거나 `pip install mediapipe`로 대체하세요.
+> `requirements.txt`에는 MediaPipe의 로컬 whl 경로가 포함되어 있습니다. 이는 Mediapipe 0.10.14를 사용하기 때문입니다.
+> PyPI에서 whl로 설치가 가능합니다.
 
 ffmpeg은 시스템에 별도로 설치 및 PATH 등록이 필요합니다.
 
