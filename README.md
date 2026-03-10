@@ -89,16 +89,33 @@ data/
 
 ## 설치
 
-**Python 3.12 권장** (MediaPipe 바이너리가 cp312 기준으로 포함됨)
+**Python 3.12 권장**
 
+### 1. 패키지 설치
 ```bash
 pip install -r requirements.txt
 ```
 
-> `requirements.txt`에는 MediaPipe의 로컬 whl 경로가 포함되어 있습니다. 이는 Mediapipe 0.10.14를 사용하기 때문입니다.
-> PyPI에서 whl로 설치가 가능합니다.
+### 2. MediaPipe 별도 설치 (필수)
+
+MediaPipe 0.10.14는 Windows cp312 빌드가 PyPI에 등록되어 있지 않아 whl 파일을 직접 다운로드하여 설치해야 합니다.
+
+1. 아래 링크에서 `mediapipe-0.10.14-cp312-cp312-win_amd64.whl` 파일을 다운로드합니다.
+   - https://github.com/google-ai-edge/mediapipe/releases/tag/v0.10.14
+   - https://pypi.org/project/mediapipe/0.10.14/#files
+2. 다운로드한 whl 파일을 `data/package/` 폴더에 넣습니다.
+3. 아래 명령으로 설치합니다.
+```bash
+pip install data/package/mediapipe-0.10.14-cp312-cp312-win_amd64.whl
+```
+
+> 다른 버전의 MediaPipe를 사용할 경우 호환성 문제가 발생할 수 있습니다.
+
+### 3. ffmpeg 설치
 
 ffmpeg은 시스템에 별도로 설치 및 PATH 등록이 필요합니다.
+
+- 다운로드: https://www.gyan.dev/ffmpeg/builds/ → `ffmpeg-release-full-build` 권장
 
 ---
 
@@ -128,14 +145,6 @@ BPM 입력 (기본값: 120): 95
 |---|---|
 | `ESC` | 분석 중단 |
 | `SPACE` | 캘리브레이션 재설정 |
-
-### Vision 단독 테스트
-
-```bash
-python main2.py
-```
-
-전체 파이프라인 없이 Vision 분석만 실행합니다.
 
 ---
 
