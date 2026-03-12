@@ -7,3 +7,24 @@ data/**/*
 # 프로젝트 전체에서 특정 확장자 무시
 *.pyc
 **/__pycache__/
+
+# IDE
+.idea/
+.vscode/
+
+# 가상환경
+.venv/
+venv/
+env/
+
+# 대용량 파일
+*.pt
+*.pth
+*.mp4
+*.wav
+*.avi
+*.whl
+
+# OS
+.DS_Store
+Thumbs.db
