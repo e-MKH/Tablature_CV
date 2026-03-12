@@ -1,0 +1,13 @@
+New-Item -ItemType File data/input/.gitkeep
+New-Item -ItemType File data/processed/videos/.gitkeep
+New-Item -ItemType File data/processed/audios/.gitkeep
+New-Item -ItemType File data/processed/sessions/.gitkeep
+New-Item -ItemType File data/analysis/vision/.gitkeep
+New-Item -ItemType File data/analysis/audio/.gitkeep
+New-Item -ItemType File data/analysis/matched/.gitkeep
+New-Item -ItemType File data/output/.gitkeep
+New-Item -ItemType File data/temp/.gitkeep
+New-Item -ItemType File data/models/.gitkeep
+
+New-Item -ItemType File data/processed/.gitkeep
+New-Item -ItemType File data/analysis/.gitkeep
