@@ -13,6 +13,17 @@ Tablature_CV는 베이스 기타 연주 영상을 입력으로 받아, 영상에
 
 ---
 
+## 팀원
+
+| GitHub |
+|---|
+| [@dayeong0222](https://github.com/dayeong0222) |
+| [@seonghoon00](https://github.com/seonghoon00) |
+| [@e-MKH](https://github.com/e-MKH) |
+| [@LotteryTicketz](https://github.com/LotteryTicketz) |
+
+---
+
 ## 주요 기술 스택
 
 | 역할 | 라이브러리 |
