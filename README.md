@@ -1,19 +1,39 @@
-# Tablature_CV
+# Tab_CV_Bass
 
-베이스 기타 연주 영상을 분석하여 자동으로 악보(타블러처)를 생성하는 컴퓨터 비전 + 오디오 분석 파이프라인입니다.
+**Audio-visual transcription of bass guitar performance video into tablature.**
+
+`Tab_CV_Bass` takes a video of someone playing bass and reconstructs what was played — not
+just *which notes*, but *where and how* they were played on the instrument. It combines
+YOLOv11 instance segmentation, MediaPipe hand tracking, and a Demucs + librosa audio chain.
+
+> **Status: research in progress.**
+> The audio pipeline is implemented and verified end-to-end. The right-hand vision pipeline
+> is implemented but **has never been executed**. The project's central research question —
+> whether right-hand playing technique can be classified from video — is still open.
 
 ---
 
-## 개요
+## Why vision?
 
-Tablature_CV는 베이스 기타 연주 영상을 입력으로 받아, 영상에서 손가락 위치를 추적하고 오디오에서 음정을 분석하여 이를 통합한 MusicXML 악보 파일을 생성합니다.
+Pitch alone cannot determine fingering. On a 4-string bass the same pitch is playable at
+several string/fret combinations, so an audio-only transcriber can output *a* note but not
+*the* tab position the player actually used. Video supplies the missing constraint.
 
-- **입력**: 베이스 기타 연주 영상 (`.mp4` 등)
-- **출력**: 타블러처 정보가 포함된 악보 (`.musicxml`)
+The predecessor project (`Tablature_CV`, a capstone) proved this pipeline shape works, but
+its right-hand analysis only detected onsets — it could not tell **slap** from **pop** from
+**fingerstyle**. `Tab_CV_Bass` is a full rewrite built around that unsolved problem.
+
+**Core research question:** *Can right-hand playing technique (slap / pop / fingerstyle) be
+detected from video?* The answer determines the rest of the architecture. If it succeeds,
+audio is demoted from "the thing that decides pitch" to "a verification channel."
+
+**Scope**
+- 4-string bass (confirmed). 5+ string support under consideration. Guitar support removed.
+- Primary output: tablature. `.mscz` bass tab export is optional, not a priority.
 
 ---
 
-## 팀원
+## Team
 
 | GitHub |
 |---|
@@ -24,211 +44,269 @@ Tablature_CV는 베이스 기타 연주 영상을 입력으로 받아, 영상에
 
 ---
 
-## 주요 기술 스택
+## Tech stack
 
-| 역할 | 라이브러리 |
+| Role | Library / Tool |
 |---|---|
-| A/V 분리 | ffmpeg |
-| 세션(악기) 분리 | Demucs (htdemucs) |
-| 객체 탐지 (프렛) | YOLOv11 (Ultralytics) |
-| 손 추적 | MediaPipe |
-| 피치 분석 | librosa (pyin) |
-| 악보 생성 | music21 |
-| 영상 처리 | OpenCV |
+| A/V extraction | ffmpeg |
+| Source separation | Demucs (`htdemucs`, `--two-stems=bass`) |
+| Instrument segmentation | YOLOv11 instance segmentation (Ultralytics) |
+| Right-hand detection | YOLO detection (Ultralytics) |
+| Fingertip tracking | MediaPipe Hands |
+| Tempo / beat tracking | librosa (HPSS + `beat_track`) |
+| Pitch & note extraction | librosa (pYIN) |
+| Video / geometry processing | OpenCV |
+| Annotation | Roboflow (polygon, modal masking) |
+| Path management | pathlib (`FilePathManager`) |
+| Score generation | *planned* — music21 / tablature renderer |
+
+Trained classes (`weights_bass.pt`): `board`, `fret_zone`, `left_hand`, `nut`.
+`string` is deliberately **not** a class — see [Design decisions](#design-decisions).
 
 ---
 
-## 프로젝트 구조
+## Current status
+
+| Area | State |
+|---|---|
+| Audio pipeline (stages 1–5) | ✅ Implemented and verified on real footage |
+| Vision pipeline (stages 6–7) | ⚠️ Implemented, **0 executions**, heuristics unvalidated |
+| Trained weights (`weights_bass.pt`, `weights_hand.pt`) | ✅ Available |
+| Annotation & augmentation methodology | ✅ Established and documented |
+| Right-hand technique classifier | ❌ Not started — *the core problem* |
+| Left-hand fret detection | ❌ Not started (`left_hand` class trained, no consumer code) |
+| Audio ↔ vision temporal fusion | ❌ Not started |
+| Tablature rendering | ❌ Not started (fingering optimizer parked in `legacy/core_change/`) |
+
+---
+
+## Pipeline
 
 ```
-Tablature_CV/
-├── main.py                          # 전체 파이프라인 실행
-├── main2.py                         # Vision 단독 테스트
-├── requirements.txt
+input                preprocessing            core processing                    output
+mp4 ──▶ ① audio extract ──▶ ② Demucs ──▶ ③ BPM ──▶ ④ pYIN notes ──────▶ ⑤ {name}_audio_final.json
+  │        (ffmpeg)         (two-stems)   (HPSS)    (C1–C3, grouped)
+  └──────────────────────────────────▶ ⑥ right-hand vision ──────────▶ ⑦ {name}_vision_final.json
+                                          (YOLO ×2 + MediaPipe)
+```
+
+| # | Module | Tech | Key parameters |
+|---|---|---|---|
+| ① | `legacy/separator.py` | ffmpeg subprocess | 48 kHz, mono, `pcm_s16le` |
+| ② | `audio/demucs_runner.py` | Demucs `htdemucs` | `--two-stems=bass`, `--shifts=10`, result caching, `TORCHAUDIO_USE_TORCHCODEC=0` |
+| ③ | `audio/bpm_estimator.py` | librosa HPSS + `beat_track` | `tightness=50`, fixed tempo, no octave correction |
+| ④ | `audio/note_extractor.py` | `librosa.pyin` | `fmin=C1`, `fmax=C3`, min duration 0.05 s, MIDI grouping |
+| ⑤ | `audio/report_writer.py` | JSON | metadata + `beat_grid` + `notes` |
+| ⑥ | `vision/right_hand_pipeline.py` | YOLOv11 seg + YOLO det + MediaPipe Hands | `conf=0.3`, left-quarter hand rule, `STRING_RATIOS`, 35 px threshold, 20 px ROI pad, ≥3 `fret_zone` required |
+| ⑦ | `vision/report_writer.py` | JSON | metadata + per-frame records |
+
+**Not in the pipeline yet:** technique classification (expected between ⑥ and ⑦), left-hand
+fret stage, ⑤+⑦ temporal fusion, tab rendering.
+
+### Vision stage internals
+
+1. **Fretboard** — segment `nut` and `fret_zone`. Each zone's contour → convex hull →
+   `minAreaRect` → 4 corners sorted near/far and top/bottom relative to the nut
+   (`smart_sort_and_label_v6`).
+2. **String lines** — all top corners and all bottom corners are fitted separately with
+   `cv2.fitLine(DIST_HUBER)`, giving a top and a bottom reference line.
+3. **Virtual strings** — the four strings are interpolated between those lines at
+   `STRING_RATIOS = [0.9, 2.85, 4.85, 6.8] / 8`. No string is ever detected directly.
+4. **Right hand** — a `weights_hand.pt` box whose center falls in the **left quarter** of the
+   frame is taken as the picking hand; MediaPipe Hands runs inside that ROI and returns five
+   fingertips (thumb, index, middle, ring, pinky).
+5. **Candidate strings** — any fingertip within **35 px** of a virtual string line registers
+   that string as a candidate for the frame.
+
+There is no temporal smoothing. The only stabilization is carry-forward state: `last_nut`
+persists when the nut is missed, and the previous string lines persist when fewer than three
+`fret_zone` instances are detected in a frame.
+
+---
+
+## Repository structure
+
+```
+Tab_CV_Bass/
+├── main.py                      ★ the only entry point (7-stage orchestrator)
+├── requirements.txt             ⚠️ currently unreliable — see Known issues
+├── data/
+│   ├── input/                   source videos
+│   ├── models/                  weights_bass.pt (seg), weights_hand.pt (right-hand box)
+│   ├── output/                  wav / json / mp4 artifacts (git-ignored)
+│   └── reference/               research papers (current + old/)
 └── src/
-    ├── config/
-    │   ├── paths.py                 # 데이터 디렉토리 경로 상수
-    │   ├── constants.py             # BPM, 박자표 등 기본 상수
-    │   └── vision_config.py        # Vision 파라미터 설정
-    ├── preprocessing/
-    │   ├── separator.py             # A/V 분리 (ffmpeg)
-    │   └── session_separator.py    # 악기 세션 분리 (Demucs)
-    ├── audio_analysis/
-    │   ├── audio_pipeline.py        # 오디오 분석 파이프라인
-    │   ├── bass_pitch_analyzer.py   # pyin 피치 분석
-    │   └── note_detector.py         # 음표 검출
-    ├── vision/
-    │   ├── run_analysis.py          # Vision 분석 파이프라인
-    │   ├── bass_system.py           # BassTabSystem 통합 클래스
-    │   ├── detection.py             # YOLO 프렛 탐지, MediaPipe 손 탐지
-    │   ├── tracking.py              # 코너 추적 (Optical Flow)
-    │   ├── calibration.py           # 캘리브레이션 UI
-    │   ├── bass_geometry.py         # 현/프렛 좌표 계산
-    │   └── filters.py               # One Euro Filter
-    ├── matching/
-    │   ├── match_pipeline.py        # 매칭 파이프라인
-    │   └── video_audio_matcher.py   # 타임스탬프 기반 매칭
-    ├── notation/
-    │   ├── bass_musicxml_generator.py  # MusicXML 생성
-    │   ├── position_predictor.py       # 포지션 예측 (매칭 실패 시)
-    │   └── quantizer.py                # 박자 양자화
-    └── utils/
-        ├── file_manager.py          # 경로 관리 (FilePathManager)
-        ├── image_utils.py           # 이미지 유틸
-        └── json_utils.py            # JSON 유틸
+    ├── audio/                   demucs_runner, bpm_estimator, note_extractor, report_writer
+    ├── vision/                  fretboard_detector, hand_detector, right_hand_pipeline, report_writer
+    ├── utils/                   file_path_manager (pathlib-based path resolution)
+    ├── test/                    standalone validation scripts (the one place direct execution is allowed)
+    └── legacy/                  archived experiments and preserved alternatives
+        └── core_change/         originals of the modules merged in 2026-06
 ```
 
-### 데이터 디렉토리 구조
-
-```
-data/
-├── input/                  # 입력 영상 파일
-├── processed/
-│   ├── videos/             # 오디오 제거된 영상
-│   ├── audios/             # 추출된 전체 오디오
-│   └── sessions/           # 악기별 분리 오디오 (bass, other)
-├── analysis/
-│   ├── vision/             # Vision 분석 결과 JSON
-│   ├── audio/              # 오디오 분석 결과 JSON
-│   └── matched/            # 매칭 결과 JSON
-├── models/
-│   └── weights.pt          # YOLO 모델 가중치
-└── output/                 # 최종 MusicXML 출력
-```
+**Architecture rule (non-negotiable):** `main.py` only orchestrates. All logic lives in
+`src/`, and no module under `src/` is meant to be run on its own — `src/test/` is the sole
+exception.
 
 ---
 
-## 설치
+## Getting started
 
-**Python 3.12 권장**
+### Requirements
 
-### 1. 패키지 설치
+- Python 3.11+ (developed on Miniconda, Windows)
+- **ffmpeg** available on `PATH`
+- PyTorch (current dev environment: torch 2.10.0 CPU / torchaudio 2.10.0 / torchvision 0.25.0)
+
+Core packages: `ultralytics`, `opencv-python`, `mediapipe`, `demucs`, `librosa`, `soundfile`,
+`numpy`, `torch`.
+
+> `requirements.txt` is currently **not usable** — it was frozen mid-experiment, is saved in
+> UTF-16, contains local `file://` paths and abandoned experiment artifacts, and is missing
+> `demucs`. Install the packages above manually until it is regenerated.
+
+### Installation
+
 ```bash
-pip install -r requirements.txt
+# 1. dependencies
+pip install ultralytics opencv-python mediapipe demucs librosa soundfile
+
+# 2. ffmpeg — must be callable as `ffmpeg` from the shell
+ffmpeg -version
+
+# 3. weights — place both files in data/models/
+#    weights_bass.pt   (YOLOv11 instance segmentation: board / fret_zone / left_hand / nut)
+#    weights_hand.pt   (YOLO detection: right-hand bounding box)
 ```
 
-### 2. MediaPipe 별도 설치 (필수)
-
-MediaPipe 0.10.14는 Windows cp312 빌드가 PyPI에 등록되어 있지 않아 whl 파일을 직접 다운로드하여 설치해야 합니다.
-
-1. 아래 링크에서 `mediapipe-0.10.14-cp312-cp312-win_amd64.whl` 파일을 다운로드합니다.
-   - https://github.com/google-ai-edge/mediapipe/releases/tag/v0.10.14
-   - https://pypi.org/project/mediapipe/0.10.14/#files
-2. 다운로드한 whl 파일을 `data/package/` 폴더에 넣습니다.
-3. 아래 명령으로 설치합니다.
-```bash
-pip install data/package/mediapipe-0.10.14-cp312-cp312-win_amd64.whl
-```
-
-> 다른 버전의 MediaPipe를 사용할 경우 호환성 문제가 발생할 수 있습니다.
-
-### 3. ffmpeg 설치
-
-ffmpeg은 시스템에 별도로 설치 및 PATH 등록이 필요합니다.
-
-- 다운로드: https://www.gyan.dev/ffmpeg/builds/ → `ffmpeg-release-full-build` 권장
-
----
-
-## 사용법
-
-1. `data/input/` 폴더에 분석할 베이스 기타 연주 영상을 넣습니다.
-2. `data/models/weights.pt`에 YOLO 모델 가중치 파일을 준비합니다.
-3. 아래 명령으로 실행합니다.
+### Usage
 
 ```bash
 python main.py
+# > 파일 탐색 (ex: video.mp4):  drowning.mp4
 ```
 
-4. 파일명과 BPM을 입력합니다.
+Place the video in `data/input/` first. Both reports are written to `data/output/`.
 
+### Output
+
+`{name}_audio_final.json`
+
+```json
+{
+  "metadata": { "file": "drowning", "bpm": 128.0, "analysis_date": "2026-08-04" },
+  "beat_grid": [0.51, 0.98, 1.45],
+  "notes": [{ "start_s": 1.2, "end_s": 1.45, "pitch": 43, "velocity": 0.87 }]
+}
 ```
-파일 탐색 (ex: movie.mp4): my_bass_video.mp4
-BPM 입력 (기본값: 120): 95
+
+`{name}_vision_final.json`
+
+```json
+{
+  "metadata": { "file": "drowning", "fps": 30.0, "total_frames": 4500, "analysis_date": "2026-08-04" },
+  "frames": [
+    {
+      "frame": 120,
+      "time_s": 4.0,
+      "hand_box": [210.4, 388.1, 402.7, 566.9],
+      "fingertips": { "thumb": [268, 431], "index": [301, 470] },
+      "candidate_strings": [3, 4]
+    }
+  ]
+}
 ```
 
-5. Vision 분석이 시작되면 캘리브레이션 UI가 열립니다. 영상에서 **베이스 넥의 4개 코너(너트~마지막 프렛, 위아래)**를 클릭하여 지정합니다.
-6. 분석이 완료되면 `data/output/` 폴더에 `.musicxml` 파일이 생성됩니다.
-
-### 실행 중 단축키
-
-| 키 | 동작 |
-|---|---|
-| `ESC` | 분석 중단 |
-| `SPACE` | 캘리브레이션 재설정 |
+`hand_box` is `null` and `fingertips` is empty when no picking hand is found in the frame.
 
 ---
 
-## 전체 파이프라인
+## Design decisions
 
-```
-[입력: mp4]
-    │
-    ▼
-① A/V 분리 (ffmpeg)
-    │── processed/videos/ (영상)
-    └── processed/audios/ (전체 오디오 wav)
-    │
-    ▼
-② 세션 분리 (Demucs htdemucs)
-    └── processed/sessions/ (bass.wav, other.wav)
-    │
-    ▼
-③ Vision 분석 (YOLO + MediaPipe + Optical Flow)
-    │  - 사용자 캘리브레이션으로 넥 영역 지정
-    │  - Pre-Scan으로 프렛 위치 학습
-    │  - 프레임마다 손가락 끝 좌표 추적
-    │  - One Euro Filter로 좌표 노이즈 제거
-    │  - 현 번호 / 프렛 번호 계산
-    └── analysis/vision/*.json
-    │
-    ▼
-④ 오디오 분석 (librosa pyin)
-    │  - 피치(주파수) 분석 → MIDI 변환
-    │  - 연속 프레임 병합 → 음표 리스트
-    │  - BPM 기반 beat 위치 계산
-    │  - 16분음표 그리드 양자화
-    └── analysis/audio/*.json
-    │
-    ▼
-⑤ 비디오-오디오 매칭
-    │  - 타임스탬프 기반 vision ↔ audio 매칭
-    └── analysis/matched/*.json
-    │
-    ▼
-⑥ MusicXML 생성 (music21)
-    │  - 오디오 음표 기준으로 vision 포지션 통합
-    │  - 매칭 실패 시 마지막 포지션 기반 예측 (빨간색 표시)
-    │  - 쉼표 자동 삽입
-    └── output/*.musicxml
-```
+Each of these was made against measured failure, not preference.
+
+**No `string` class.** Direct string segmentation was trained in the predecessor project and
+reached only **47–48 % mAP50** — at `conf=0.1` it still found just 2 of 4 strings. Three
+causes: thin objects produce weak confidence, parallel strings suppress each other under NMS,
+and 1–3 px polygon annotation cannot be labeled consistently. Rather than fight it, strings
+were removed from the class set and are now derived geometrically from the classes that *do*
+detect reliably (board/nut/fret at 96–100 %). Residual error is meant to be corrected
+downstream by audio pitch matching.
+
+**Modal masking, not amodal.** Labeling occluded regions would teach the model that skin
+pixels are instrument pixels. Amodal is also impractical for thin linear objects, YOLO has no
+unknown-pixel label, and occluded geometry can be recovered in post-processing instead.
+
+**Photometric augmentation only.** Rotation, blur, and noise destroy thin linear features and
+break the spatial relationships between instrument components. Only brightness, exposure,
+saturation, and hue are used, at a conservative 2× (1,001 source images → 1,702 train).
+
+**Zones, not frets.** Following the TapToTab approach: the question is *which fret interval a
+finger occupies*, not the exact pixel position of a fret wire. This simplifies both labeling
+and inference.
+
+**YOLO + MediaPipe hybrid for the right hand.** YOLO answers "where is the picking hand"
+(context, robust to motion), MediaPipe answers "where exactly are the fingertips." Right-hand
+annotation is bounding-box only, on the hypothesis that position, angle, and coarse pose
+carry enough signal to separate techniques.
+
+**Simplification with a preserved recovery path.** The June 2026 integration deliberately
+dropped 4-stem separation, BPM octave correction, and OneEuroFilter smoothing to get a thin
+pipeline running end-to-end. Every dropped component is preserved in runnable form under
+`src/legacy/` and `src/test/` so it can be restored if measurement demands it.
 
 ---
 
-## 출력 포맷
+## Known issues and unverified assumptions
 
-생성된 `.musicxml` 파일은 MuseScore, Guitar Pro 등 악보 프로그램에서 열 수 있습니다.
+**Blocking**
+- The vision pipeline has never run. `weights_bass.pt`'s `model.names` must be confirmed to
+  contain exactly `'nut'` and `'fret_zone'` before the first execution.
+- `main.py` imports `extract_audio_from_video` from `src.legacy.separator` — a structural
+  violation. `separator.py` should be promoted to `src/audio/` or a new `src/preprocessing/`.
+- `requirements.txt` needs a full rewrite.
 
-- 각 음표에 `현:프렛` 형태의 탭 정보가 가사(Lyric)로 포함됩니다. (예: `A:3`)
-- Vision에서 추적하지 못해 예측된 포지션은 **빨간색**으로 표시됩니다.
-- 손가락 번호 정보가 있을 경우 함께 표기됩니다.
+**Unvalidated heuristics** (all three are first-run checks)
+- `STRING_RATIOS` was ported from an older project's empirical tuning and has not been
+  re-validated on current footage, instruments, or camera angles.
+- "Left quarter of the frame = picking hand" assumes a frontal camera setup.
+- The 35 px candidate-string threshold, and whether unsmoothed per-frame fingertips are
+  stable enough at all. If jitter appears, OneEuroFilter is the first thing to restore.
+
+**Latent risks**
+- BPM octave correction was removed, so half-tempo errors (e.g. 83 reported for a ~166 BPM
+  track) can recur. The corrected implementation is preserved at `legacy/librosa_beat.py`.
+- Fretboard analysis depends on `last_nut`; if the nut is never detected in the opening
+  frames, every downstream stage silently produces nothing for those frames.
+- Variable tempo is unsupported — fixed BPM is assumed. `beat_this` (ISMIR 2024) is the
+  reserved solution; `madmom` was rejected for Python 3.11 incompatibility.
+- Quantitative metrics for the current segmentation model have not been recorded.
 
 ---
 
-## 주요 파라미터
+## Roadmap
 
-| 파라미터 | 기본값 | 설명 |
-|---|---|---|
-| BPM | 120 | 곡의 빠르기 (사용자 입력) |
-| fmin_hz | 40.0 Hz | 피치 분석 최소 주파수 (베이스 범위) |
-| fmax_hz | 300.0 Hz | 피치 분석 최대 주파수 |
-| onset_grid | 0.25 beat | 음표 시작 양자화 단위 (16분음표) |
-| Demucs 모델 | htdemucs | 4-stem 분리 모델 |
+1. **First full run** of `main.py` on `drowning.mp4`; validate the three vision heuristics
+   against real output.
+2. **Qualitative analysis** of fingertip trajectories in `*_vision_final.json` — do they
+   contain signal that separates slap / pop / fingerstyle? Then choose an approach
+   (rule-based vs. temporal classifier).
+3. Cleanup pass: promote `separator.py`, regenerate `requirements.txt`, split `legacy/` into
+   dead code vs. preserved candidates.
+4. Left-hand fret detection (consumes the trained `left_hand` class).
+5. Audio ↔ vision temporal fusion, then tablature rendering.
+6. Optional: 5+ string support, `.mscz` export, ground-truth-based quantitative evaluation.
 
 ---
 
-## 참고 사항
+## Background
 
-- 손 감지 실패 시, 설정된 허용 프레임 수 이내라면 마지막 유효 포지션을 재사용합니다.
-- 현재 4현 베이스 기타를 기준으로 설계되었습니다.
-- YOLO 가중치(`weights.pt`)는 별도로 학습하거나 준비해야 합니다.
+Grew out of **Tablature_CV**, a capstone project transcribing bass and guitar video to
+MusicXML (84.94 % audio-vision matching, later 87.6 %). Those numbers are **not** carried
+over as baselines — `Tab_CV_Bass` is a full rewrite with a different class set, a different
+core problem, and a narrower instrument scope. What was carried over is the reasoning: the
+string-detection failure data is precisely what made the current geometric approach the
+obvious choice.
+
+Key references are kept in `data/reference/` (HTDemucs, MT3, beat tracking, bass/guitar
+string detection, multimodal guitar dataset, ConvGRU action recognition).
