@@ -1,8 +1,8 @@
-# Tab_CV_Bass
+# Tablature_CV
 
 **Audio-visual transcription of bass guitar performance video into tablature.**
 
-`Tab_CV_Bass` takes a video of someone playing bass and reconstructs what was played — not
+`Tablature_CV` takes a video of someone playing bass and reconstructs what was played — not
 just *which notes*, but *where and how* they were played on the instrument. It combines
 YOLOv11 instance segmentation, MediaPipe hand tracking, and a Demucs + librosa audio chain.
 
@@ -21,7 +21,7 @@ several string/fret combinations, so an audio-only transcriber can output *a* no
 
 The predecessor project (`Tablature_CV`, a capstone) proved this pipeline shape works, but
 its right-hand analysis only detected onsets — it could not tell **slap** from **pop** from
-**fingerstyle**. `Tab_CV_Bass` is a full rewrite built around that unsolved problem.
+**fingerstyle**. `Tablature_CV` is a full rewrite built around that unsolved problem.
 
 **Core research question:** *Can right-hand playing technique (slap / pop / fingerstyle) be
 detected from video?* The answer determines the rest of the architecture. If it succeeds,
@@ -127,7 +127,7 @@ persists when the nut is missed, and the previous string lines persist when fewe
 ## Repository structure
 
 ```
-Tab_CV_Bass/
+Tablature_CV/
 ├── main.py                      ★ the only entry point (7-stage orchestrator)
 ├── requirements.txt             ⚠️ currently unreliable — see Known issues
 ├── data/
@@ -303,7 +303,7 @@ pipeline running end-to-end. Every dropped component is preserved in runnable fo
 
 Grew out of **Tablature_CV**, a capstone project transcribing bass and guitar video to
 MusicXML (84.94 % audio-vision matching, later 87.6 %). Those numbers are **not** carried
-over as baselines — `Tab_CV_Bass` is a full rewrite with a different class set, a different
+over as baselines — `Tablature_CV` is a full rewrite with a different class set, a different
 core problem, and a narrower instrument scope. What was carried over is the reasoning: the
 string-detection failure data is precisely what made the current geometric approach the
 obvious choice.
