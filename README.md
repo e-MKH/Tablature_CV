@@ -1,35 +1,14 @@
 # Tablature_CV
 
-**Audio-visual transcription of bass guitar performance video into tablature.**
+**Audio-visual transcription of bass guitar performance video into a MusicXML score with tablature positions.**
 
-`Tablature_CV` takes a video of someone playing bass and reconstructs what was played — not
-just *which notes*, but *where and how* they were played on the instrument. It combines
-YOLOv11 instance segmentation, MediaPipe hand tracking, and a Demucs + librosa audio chain.
+`Tablature_CV` takes a video of someone playing bass, detects *which notes* were played from the
+audio and *where on the fretboard* they were played from the video, then merges both into a
+MusicXML score annotated with string/fret positions.
 
-> **Status: research in progress.**
-> The audio pipeline is implemented and verified end-to-end. The right-hand vision pipeline
-> is implemented but **has never been executed**. The project's central research question —
-> whether right-hand playing technique can be classified from video — is still open.
-
----
-
-## Why vision?
-
-Pitch alone cannot determine fingering. On a 4-string bass the same pitch is playable at
-several string/fret combinations, so an audio-only transcriber can output *a* note but not
-*the* tab position the player actually used. Video supplies the missing constraint.
-
-The predecessor project (`Tablature_CV`, a capstone) proved this pipeline shape works, but
-its right-hand analysis only detected onsets — it could not tell **slap** from **pop** from
-**fingerstyle**. `Tablature_CV` is a full rewrite built around that unsolved problem.
-
-**Core research question:** *Can right-hand playing technique (slap / pop / fingerstyle) be
-detected from video?* The answer determines the rest of the architecture. If it succeeds,
-audio is demoted from "the thing that decides pitch" to "a verification channel."
-
-**Scope**
-- 4-string bass (confirmed). 5+ string support under consideration. Guitar support removed.
-- Primary output: tablature. `.mscz` bass tab export is optional, not a priority.
+> **Status: runnable.** The full 7-stage pipeline in `main.py` runs end-to-end and produces a
+> MusicXML file. This is the main repository of the project; started as a capstone and continued
+> as an ongoing team project.
 
 ---
 
@@ -44,83 +23,105 @@ audio is demoted from "the thing that decides pitch" to "a verification channel.
 
 ---
 
+## What it does
+
+Pitch alone cannot determine fingering: on a 4-string bass the same pitch is playable at several
+string/fret combinations. This project resolves that ambiguity by matching each audio note
+against the fretting-hand position observed in the video.
+
+- **Audio** decides *what* was played (pitch, onset, duration).
+- **Video** decides *where* it was played (string, fret, finger).
+- Notes the video cannot confirm are filled in by a position predictor and marked as uncertain.
+
+**Scope of this implementation**
+- Instrument: 4-string bass (E–A–D–G, standard tuning).
+- The fretting hand is analyzed. **Right-hand (picking) technique is not analyzed.**
+- Tempo is **entered by the user**, not estimated (see [Limitations](#known-limitations)).
+- Output: MusicXML (rendered with music21). Tab positions are written as note lyrics
+  (e.g. `E:5`), not as a native tablature staff.
+
+---
+
 ## Tech stack
 
 | Role | Library / Tool |
 |---|---|
-| A/V extraction | ffmpeg |
-| Source separation | Demucs (`htdemucs`, `--two-stems=bass`) |
-| Instrument segmentation | YOLOv11 instance segmentation (Ultralytics) |
-| Right-hand detection | YOLO detection (Ultralytics) |
-| Fingertip tracking | MediaPipe Hands |
-| Tempo / beat tracking | librosa (HPSS + `beat_track`) |
+| A/V separation | ffmpeg |
+| Source separation | Demucs (`htdemucs`) |
+| Fret localization | YOLO instance segmentation (Ultralytics, `weights.pt`) — only `fret` boxes used at inference |
+| Fretboard tracking | OpenCV Lucas–Kanade optical flow |
+| Fingertip tracking | MediaPipe Hands + One Euro Filter |
 | Pitch & note extraction | librosa (pYIN) |
-| Video / geometry processing | OpenCV |
-| Annotation | Roboflow (polygon, modal masking) |
+| Score generation | music21 → MusicXML |
 | Path management | pathlib (`FilePathManager`) |
-| Score generation | *planned* — music21 / tablature renderer |
-
-Trained classes (`weights_bass.pt`): `board`, `fret_zone`, `left_hand`, `nut`.
-`string` is deliberately **not** a class — see [Design decisions](#design-decisions).
-
----
-
-## Current status
-
-| Area | State |
-|---|---|
-| Audio pipeline (stages 1–5) | ✅ Implemented and verified on real footage |
-| Vision pipeline (stages 6–7) | ⚠️ Implemented, **0 executions**, heuristics unvalidated |
-| Trained weights (`weights_bass.pt`, `weights_hand.pt`) | ✅ Available |
-| Annotation & augmentation methodology | ✅ Established and documented |
-| Right-hand technique classifier | ❌ Not started — *the core problem* |
-| Left-hand fret detection | ❌ Not started (`left_hand` class trained, no consumer code) |
-| Audio ↔ vision temporal fusion | ❌ Not started |
-| Tablature rendering | ❌ Not started (fingering optimizer parked in `legacy/core_change/`) |
 
 ---
 
 ## Pipeline
 
+`main.py` runs seven stages in order.
+
 ```
-input                preprocessing            core processing                    output
-mp4 ──▶ ① audio extract ──▶ ② Demucs ──▶ ③ BPM ──▶ ④ pYIN notes ──────▶ ⑤ {name}_audio_final.json
-  │        (ffmpeg)         (two-stems)   (HPSS)    (C1–C3, grouped)
-  └──────────────────────────────────▶ ⑥ right-hand vision ──────────▶ ⑦ {name}_vision_final.json
-                                          (YOLO ×2 + MediaPipe)
+mp4 ─▶ ① A/V split ─┬─▶ audio ─▶ ② Demucs ─▶ bass.wav ─▶ ④ pYIN + quantize ─▶ audio.json ─┐
+       (ffmpeg)     │                                    (user BPM)                      ├─▶ ⑤ match ─▶ matched.json
+                    └─▶ video ─▶ ③ vision (calibrate → pre-scan → track) ─▶ video.json ──┤
+                                                                                         └─▶ ⑥ MusicXML ─▶ {name}.musicxml
 ```
 
-| # | Module | Tech | Key parameters |
+| # | Module | What it does | Key parameters |
 |---|---|---|---|
-| ① | `legacy/separator.py` | ffmpeg subprocess | 48 kHz, mono, `pcm_s16le` |
-| ② | `audio/demucs_runner.py` | Demucs `htdemucs` | `--two-stems=bass`, `--shifts=10`, result caching, `TORCHAUDIO_USE_TORCHCODEC=0` |
-| ③ | `audio/bpm_estimator.py` | librosa HPSS + `beat_track` | `tightness=50`, fixed tempo, no octave correction |
-| ④ | `audio/note_extractor.py` | `librosa.pyin` | `fmin=C1`, `fmax=C3`, min duration 0.05 s, MIDI grouping |
-| ⑤ | `audio/report_writer.py` | JSON | metadata + `beat_grid` + `notes` |
-| ⑥ | `vision/right_hand_pipeline.py` | YOLOv11 seg + YOLO det + MediaPipe Hands | `conf=0.3`, left-quarter hand rule, `STRING_RATIOS`, 35 px threshold, 20 px ROI pad, ≥3 `fret_zone` required |
-| ⑦ | `vision/report_writer.py` | JSON | metadata + per-frame records |
+| ① | `preprocessing/separator.py` | Splits the input into a WAV and a silent video | 44.1 kHz, mono, `pcm_s16le`; video stream copied |
+| ② | `preprocessing/session_separator.py` | Demucs 4-stem run; keeps `bass` and `other` (saved as `_guitar.wav`) | `htdemucs` |
+| ③ | `vision/run_analysis.py` → `bass_system.py` | Fretboard calibration, fret mapping, fingertip → string/fret | see below |
+| ④ | `audio_analysis/audio_pipeline.py` | pYIN pitch → note segmentation → beat conversion → quantization | 40–300 Hz, 10 ms step, min note 0.1 s, onset grid 1/16 |
+| ⑤ | `matching/match_pipeline.py` | Matches audio notes to video frames and reports statistics | ±0.15 s window, ±1 semitone |
+| ⑥ | `notation/bass_musicxml_generator.py` | Builds the score; predicts positions for unmatched notes | 4/4, grid 1/32, predicted notes in red with `?` |
 
-**Not in the pipeline yet:** technique classification (expected between ⑥ and ⑦), left-hand
-fret stage, ⑤+⑦ temporal fusion, tab rendering.
+> Stage ⑥ re-runs the matching internally; it reads `video.json` and `audio.json`, not
+> `matched.json`. The matched JSON is a statistics/diagnostic artifact.
 
-### Vision stage internals
+### Vision stage (③) internals
 
-1. **Fretboard** — segment `nut` and `fret_zone`. Each zone's contour → convex hull →
-   `minAreaRect` → 4 corners sorted near/far and top/bottom relative to the nut
-   (`smart_sort_and_label_v6`).
-2. **String lines** — all top corners and all bottom corners are fitted separately with
-   `cv2.fitLine(DIST_HUBER)`, giving a top and a bottom reference line.
-3. **Virtual strings** — the four strings are interpolated between those lines at
-   `STRING_RATIOS = [0.9, 2.85, 4.85, 6.8] / 8`. No string is ever detected directly.
-4. **Right hand** — a `weights_hand.pt` box whose center falls in the **left quarter** of the
-   frame is taken as the picking hand; MediaPipe Hands runs inside that ROI and returns five
-   fingertips (thumb, index, middle, ring, pinky).
-5. **Candidate strings** — any fingertip within **35 px** of a virtual string line registers
-   that string as a candidate for the frame.
+1. **Manual calibration** — on the first frame the user clicks four fretboard corners
+   (nut top, nut bottom, body top, body bottom). `SPACE` confirms, `ESC` cancels.
+2. **Pre-scan** — the YOLO segmentation model is run and only its `fret` boxes are kept in four 1-second windows (0 %, 25 %, 50 %, 75 % of the
+   video). Fret centers are projected onto the neck axis as ratios and merged into a fret map.
+   If nothing is detected, a mathematical fret layout (21 frets) is used instead.
+3. **Corner tracking** — the four corners are tracked with Lucas–Kanade optical flow.
+   If tracking is lost, analysis **stops at that frame**.
+4. **Fingertips** — MediaPipe Hands extracts index/middle/ring/pinky tips of the target hand
+   (`TARGET_HAND = "Right"` in `config/vision_config.py`; MediaPipe assumes a mirrored image, so
+   this label corresponds to the fretting hand in an unmirrored front-facing video).
+   A second, enhanced-preprocessing pass runs if the first detection fails.
+   Coordinates are smoothed with a One Euro Filter.
+5. **String / fret** — a fingertip within 25 px of a string line selects that string; its
+   projected ratio is matched to the fret map (±2 %). Each hit is stored with its MIDI number.
+6. **Memory mode** — if the hand is lost, the last valid positions are reused for up to 30 frames
+   and flagged `is_tracking: false`.
 
-There is no temporal smoothing. The only stabilization is carry-forward state: `last_nut`
-persists when the nut is missed, and the previous string lines persist when fewer than three
-`fret_zone` instances are detected in a frame.
+The analysis window is interactive: `ESC` stops early, `SPACE` pauses for recalibration.
+
+### Vision model: why a segmentation model is used only for frets
+
+`weights.pt` is a YOLO **instance segmentation** model with four classes:
+`board`, `fret`, `nut`, `string`. It is the model trained in this project; the current
+inference path deliberately uses only one of its classes.
+
+| | |
+|---|---|
+| **Initial design** | Polygon instance segmentation (rather than bounding boxes) for thin, slanted instrument parts. 650 images — 250 bass images (strings) + 400 guitar images (board/fret) whose images were reused from an existing 6-string set and re-annotated by the team. Per image: board ×1, fret ×20+, string ×4. Frets split into normal/occluded cases, weighted toward occluded in val/test. |
+| **Result** | fret 96–98 %, nut 100 %, board 69–75 %, **string 47–48 %** mAP50. Even at `conf = 0.1`, only 2 of 4 strings were found. |
+| **Why strings failed** | Strings are 1–3 px wide, so confidence is structurally low; four parallel strings suppress each other under NMS; 1–3 px polygons cannot be annotated consistently. |
+| **Final design** | String detection removed from inference. The weights still contain the `string` class, but the pipeline keeps only `fret` boxes. Strings are interpolated geometrically between the four manually clicked corners (`STRING_MARGIN = 0.12`), and Pre-Scan stores fret positions as ratios along the neck. |
+| **Trade-off** | String placement no longer depends on string-detection accuracy, but it now depends on the four manually initialized corner points. |
+
+### Matching (⑤) rules
+
+For each audio note: collect video entries within ±0.15 s of the onset → keep those whose
+string/fret MIDI is within ±1 semitone of the audio pitch → pick the smallest pitch difference,
+preferring `is_tracking: true` on ties. Unmatched notes are assigned by
+`notation/position_predictor.py`, which minimizes movement from the previous position
+(string changes weighted 5× relative to fret changes).
 
 ---
 
@@ -128,25 +129,27 @@ persists when the nut is missed, and the previous string lines persist when fewe
 
 ```
 Tablature_CV/
-├── main.py                      ★ the only entry point (7-stage orchestrator)
-├── requirements.txt             ⚠️ currently unreliable — see Known issues
+├── main.py                      entry point (7-stage orchestrator)
+├── requirements.txt
 ├── data/
 │   ├── input/                   source videos
-│   ├── models/                  weights_bass.pt (seg), weights_hand.pt (right-hand box)
-│   ├── output/                  wav / json / mp4 artifacts (git-ignored)
-│   └── reference/               research papers (current + old/)
+│   ├── models/                  weights.pt (YOLO segmentation: board/fret/nut/string)
+│   ├── processed/               videos/ audios/ sessions/
+│   ├── analysis/                vision/ audio/ matched/  (JSON)
+│   └── output/                  {name}.musicxml
 └── src/
-    ├── audio/                   demucs_runner, bpm_estimator, note_extractor, report_writer
-    ├── vision/                  fretboard_detector, hand_detector, right_hand_pipeline, report_writer
-    ├── utils/                   file_path_manager (pathlib-based path resolution)
-    ├── test/                    standalone validation scripts (the one place direct execution is allowed)
-    └── legacy/                  archived experiments and preserved alternatives
-        └── core_change/         originals of the modules merged in 2026-06
+    ├── config/                  constants.py, paths.py, vision_config.py
+    ├── preprocessing/           separator.py, session_separator.py
+    ├── vision/                  run_analysis, bass_system, calibration, detection,
+    │                            tracking, filters, bass_geometry
+    ├── audio_analysis/          audio_pipeline, bass_pitch_analyzer, note_detector
+    ├── matching/                match_pipeline, video_audio_matcher
+    ├── notation/                bass_musicxml_generator, position_predictor, quantizer
+    ├── utils/                   file_manager, image_utils, json_utils
+    └── legacy/                  earlier single-file versions (final/, audio/, video/)
 ```
 
-**Architecture rule (non-negotiable):** `main.py` only orchestrates. All logic lives in
-`src/`, and no module under `src/` is meant to be run on its own — `src/test/` is the sole
-exception.
+All logic lives in `src/`; `main.py` only calls the stages in order.
 
 ---
 
@@ -154,159 +157,117 @@ exception.
 
 ### Requirements
 
-- Python 3.11+ (developed on Miniconda, Windows)
-- **ffmpeg** available on `PATH`
-- PyTorch (current dev environment: torch 2.10.0 CPU / torchaudio 2.10.0 / torchvision 0.25.0)
+- **Python 3.12** (Windows, x64)
+- **MediaPipe 0.10.14** — installed manually from a wheel (step 2)
+- **ffmpeg** binary on `PATH` (step 3)
+- A desktop session — stage ③ opens OpenCV windows for calibration and preview
 
-Core packages: `ultralytics`, `opencv-python`, `mediapipe`, `demucs`, `librosa`, `soundfile`,
-`numpy`, `torch`.
-
-> `requirements.txt` is currently **not usable** — it was frozen mid-experiment, is saved in
-> UTF-16, contains local `file://` paths and abandoned experiment artifacts, and is missing
-> `demucs`. Install the packages above manually until it is regenerated.
-
-### Installation
+### 1. Python packages
 
 ```bash
-# 1. dependencies
-pip install ultralytics opencv-python mediapipe demucs librosa soundfile
-
-# 2. ffmpeg — must be callable as `ffmpeg` from the shell
-ffmpeg -version
-
-# 3. weights — place both files in data/models/
-#    weights_bass.pt   (YOLOv11 instance segmentation: board / fret_zone / left_hand / nut)
-#    weights_hand.pt   (YOLO detection: right-hand bounding box)
+pip install -r requirements.txt
 ```
+
+`requirements.txt` pins torch 2.5.0, ultralytics 8.4, demucs 4.0.1, librosa 0.11, music21 9.9, etc.
+MediaPipe is intentionally **not** listed; see the next step.
+
+### 2. MediaPipe 0.10.14 (required, manual install)
+
+The vision stage depends on the legacy `mp.solutions.hands` API and is tested with MediaPipe
+**0.10.14**. A Windows cp312 build of this version cannot be installed with a plain
+`pip install mediapipe==0.10.14`, so install it from the wheel file:
+
+1. Download `mediapipe-0.10.14-cp312-cp312-win_amd64.whl` from either:
+   - https://github.com/google-ai-edge/mediapipe/releases/tag/v0.10.14
+   - https://pypi.org/project/mediapipe/0.10.14/#files
+2. Put the file in `data/package/` (wheel files are git-ignored, so it is not in the repository).
+3. Install it:
+
+```bash
+pip install data/package/mediapipe-0.10.14-cp312-cp312-win_amd64.whl
+```
+
+> Other MediaPipe versions may break the hand-tracking stage.
+
+### 3. ffmpeg (required)
+
+Stage ① calls the `ffmpeg` command directly through `subprocess`, so the ffmpeg **binary** must be
+installed on the system and registered on `PATH`.
+
+- Download: https://www.gyan.dev/ffmpeg/builds/ → `ffmpeg-release-full-build` recommended
+- Verify:
+
+```bash
+ffmpeg -version
+```
+
+> The `ffmpeg` entry in `requirements.txt` is a Python package, not the ffmpeg program.
+> Installing requirements alone does **not** provide the binary.
+
+### 4. Model weights
+
+Place the YOLO segmentation weights at `data/models/weights.pt` (`.pt` files are git-ignored).
 
 ### Usage
 
 ```bash
 python main.py
-# > 파일 탐색 (ex: video.mp4):  drowning.mp4
+# 파일 탐색 (ex: movie.mp4): drowning.mp4
+# BPM 입력 (기본값: 120): 111
 ```
 
-Place the video in `data/input/` first. Both reports are written to `data/output/`.
-
-### Output
-
-`{name}_audio_final.json`
-
-```json
-{
-  "metadata": { "file": "drowning", "bpm": 128.0, "analysis_date": "2026-08-04" },
-  "beat_grid": [0.51, 0.98, 1.45],
-  "notes": [{ "start_s": 1.2, "end_s": 1.45, "pitch": 43, "velocity": 0.87 }]
-}
-```
-
-`{name}_vision_final.json`
-
-```json
-{
-  "metadata": { "file": "drowning", "fps": 30.0, "total_frames": 4500, "analysis_date": "2026-08-04" },
-  "frames": [
-    {
-      "frame": 120,
-      "time_s": 4.0,
-      "hand_box": [210.4, 388.1, 402.7, 566.9],
-      "fingertips": { "thumb": [268, 431], "index": [301, 470] },
-      "candidate_strings": [3, 4]
-    }
-  ]
-}
-```
-
-`hand_box` is `null` and `fingertips` is empty when no picking hand is found in the frame.
+1. Put the video in `data/input/`.
+2. Enter the file name and the song's BPM.
+3. Click the four fretboard corners in the calibration window, then press `SPACE`.
+4. The score is written to `data/output/{name}.musicxml`.
 
 ---
 
-## Design decisions
+## Results
 
-Each of these was made against measured failure, not preference.
+MusicXML was generated end-to-end for all three test clips.
 
-**No `string` class.** Direct string segmentation was trained in the predecessor project and
-reached only **47–48 % mAP50** — at `conf=0.1` it still found just 2 of 4 strings. Three
-causes: thin objects produce weak confidence, parallel strings suppress each other under NMS,
-and 1–3 px polygon annotation cannot be labeled consistently. Rather than fight it, strings
-were removed from the class set and are now derived geometrically from the classes that *do*
-detect reliably (board/nut/fret at 96–100 %). Residual error is meant to be corrected
-downstream by audio pitch matching.
+**Note-level coverage** — the share of audio-detected notes for which the vision stream produced
+a matching (string, fret) candidate:
 
-**Modal masking, not amodal.** Labeling occluded regions would teach the model that skin
-pixels are instrument pixels. Amodal is also impractical for thin linear objects, YOLO has no
-unknown-pixel label, and occluded geometry can be recovered in post-processing instead.
+| Clip | Coverage |
+|---|---|
+| Runaway | 93.42 % |
+| Drowning | 87.60 % |
+| Welcome to the Show | 77.64 % |
 
-**Photometric augmentation only.** Rotation, blur, and noise destroy thin linear features and
-break the spatial relationships between instrument components. Only brightness, exposure,
-saturation, and hue are used, at a conservative 2× (1,001 source images → 1,702 train).
-
-**Zones, not frets.** Following the TapToTab approach: the question is *which fret interval a
-finger occupies*, not the exact pixel position of a fret wire. This simplifies both labeling
-and inference.
-
-**YOLO + MediaPipe hybrid for the right hand.** YOLO answers "where is the picking hand"
-(context, robust to motion), MediaPipe answers "where exactly are the fingertips." Right-hand
-annotation is bounding-box only, on the hypothesis that position, angle, and coarse pose
-carry enough signal to separate techniques.
-
-**Simplification with a preserved recovery path.** The June 2026 integration deliberately
-dropped 4-stem separation, BPM octave correction, and OneEuroFilter smoothing to get a thin
-pipeline running end-to-end. Every dropped component is preserved in runnable form under
-`src/legacy/` and `src/test/` so it can be restored if measurement demands it.
+- **This is coverage, not accuracy.** It shows whether vision produced a candidate, not whether
+  that candidate was the correct string/fret. No ground-truth dataset was available for
+  positional accuracy.
+- The unmatched notes (6–22 % per clip) are filled in by the movement-minimizing position
+  predictor and marked in red with `?`, so predicted positions are never shown as verified.
 
 ---
 
-## Known issues and unverified assumptions
+## Known limitations
 
-**Blocking**
-- The vision pipeline has never run. `weights_bass.pt`'s `model.names` must be confirmed to
-  contain exactly `'nut'` and `'fret_zone'` before the first execution.
-- `main.py` imports `extract_audio_from_video` from `src.legacy.separator` — a structural
-  violation. `separator.py` should be promoted to `src/audio/` or a new `src/preprocessing/`.
-- `requirements.txt` needs a full rewrite.
-
-**Unvalidated heuristics** (all three are first-run checks)
-- `STRING_RATIOS` was ported from an older project's empirical tuning and has not been
-  re-validated on current footage, instruments, or camera angles.
-- "Left quarter of the frame = picking hand" assumes a frontal camera setup.
-- The 35 px candidate-string threshold, and whether unsmoothed per-frame fingertips are
-  stable enough at all. If jitter appears, OneEuroFilter is the first thing to restore.
-
-**Latent risks**
-- BPM octave correction was removed, so half-tempo errors (e.g. 83 reported for a ~166 BPM
-  track) can recur. The corrected implementation is preserved at `legacy/librosa_beat.py`.
-- Fretboard analysis depends on `last_nut`; if the nut is never detected in the opening
-  frames, every downstream stage silently produces nothing for those frames.
-- Variable tempo is unsupported — fixed BPM is assumed. `beat_this` (ISMIR 2024) is the
-  reserved solution; `madmom` was rejected for Python 3.11 incompatibility.
-- Quantitative metrics for the current segmentation model have not been recorded.
+- **No tempo estimation.** BPM is typed in by the user (default 120) and assumed constant;
+  4/4 is fixed.
+- **Manual calibration.** Every run requires clicking four corners; recalibration is manual.
+- **Tracking loss ends the run.** When optical-flow corner tracking fails, the vision JSON stops
+  early while the audio JSON covers the full song. Comparing the two end times is the most
+  reliable way to detect this.
+- **No `string` detection at inference.** Strings are laid out geometrically between the
+  calibrated corners (see [Vision model](#vision-model-why-a-segmentation-model-is-used-only-for-frets)).
+- **Silent fret-index shifts.** The neck axis is a linear approximation (no homography), and fret
+  numbers come from detection order — one missed low fret shifts every fret number after it
+  without raising an error.
+- **Picking hand ignored.** No onset, technique, or plucking-string information comes from the
+  right hand.
+- **Guitar stem unused.** Stage ② saves `other` as `_guitar.wav`, but no guitar transcription
+  is performed.
 
 ---
 
-## Roadmap
+## Related repository
 
-1. **First full run** of `main.py` on `drowning.mp4`; validate the three vision heuristics
-   against real output.
-2. **Qualitative analysis** of fingertip trajectories in `*_vision_final.json` — do they
-   contain signal that separates slap / pop / fingerstyle? Then choose an approach
-   (rule-based vs. temporal classifier).
-3. Cleanup pass: promote `separator.py`, regenerate `requirements.txt`, split `legacy/` into
-   dead code vs. preserved candidates.
-4. Left-hand fret detection (consumes the trained `left_hand` class).
-5. Audio ↔ vision temporal fusion, then tablature rendering.
-6. Optional: 5+ string support, `.mscz` export, ground-truth-based quantitative evaluation.
-
----
-
-## Background
-
-Grew out of **Tablature_CV**, a capstone project transcribing bass and guitar video to
-MusicXML (84.94 % audio-vision matching, later 87.6 %). Those numbers are **not** carried
-over as baselines — `Tablature_CV` is a full rewrite with a different class set, a different
-core problem, and a narrower instrument scope. What was carried over is the reasoning: the
-string-detection failure data is precisely what made the current geometric approach the
-obvious choice.
-
-Key references are kept in `data/reference/` (HTDemucs, MT3, beat tracking, bass/guitar
-string detection, multimodal guitar dataset, ConvGRU action recognition).
+**[Tab_CV_Bass](https://github.com/e-MKH/Tab_CV_Bass)** was an experimental rewrite exploring
+right-hand technique recognition (slap / pop / fingerstyle). It uses a *separate, later* pair of
+models (`board / fret_zone / left_hand / nut` segmentation + a right-hand box detector) that are
+not used here. Its usable results have been merged into this repository; what remains there is
+unapplied experimental logic kept for reference.
